@@ -1,0 +1,19 @@
+{
+  "name": "private-e2ee-chat",
+  "version": "1.0.0",
+  "description": "Simple end-to-end encrypted chat using Socket.IO",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5",
+    "uuid": "^10.0.0"
+  }
+}
