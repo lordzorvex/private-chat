@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Private E2EE Chat</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 16px;
+      background: #0f0f11;
+      color: #e1e1ff;
+    }
+    h1 { color: #a78bfa; text-align: center; }
+    #status { margin: 1rem 0; padding: 12px; background: #1a1a2e; border-radius: 8px; }
+    #users { margin: 1rem 0; }
+    .user-btn {
+      margin: 0.3rem;
+      padding: 6px 12px;
+      background: #4f46e5;
+      border: none;
+      border-radius: 6px;
+      color: white;
+      cursor: pointer;
+    }
+    #chat {
+      height: 400px;
+      overflow-y: auto;
+      background: #1a1a2e;
+      border-radius: 8px;
+      padding: 12px;
+      margin: 1rem 0;
+    }
+    .msg {
+      margin: 8px 0;
+      padding: 10px 14px;
+      border-radius: 12px;
+      max-width: 80%;
+    }
+    .sent { background: #6d28d9; margin-left: auto; }
+    .received { background: #374151; }
+    #input-area {
+      display: flex;
+      gap: 8px;
+    }
+    #message { flex: 1; padding: 12px; border-radius: 8px; border: 1px solid #4b5563; background: #111;}
+    button { padding: 12px 20px; background: #7c3aed; border: none; border-radius: 8px; color: white; cursor: pointer; }
+    button:hover { background: #9333ea; }
+  </style>
+</head>
+<body>
+
+<h1>Private E2EE Chat</h1>
+
+<div id="status">
+  Your ID: <strong id="myId">— not connected —</strong><br>
+  <small>Share this ID with your friend</small>
+</div>
+
+<div id="users">
+  <strong>Online users:</strong><br>
+  <!-- buttons will be added here -->
+</div>
+
+<div id="chat"></div>
+
+<div id="input-area">
+  <input id="message" placeholder="Type your secret message..." autocomplete="off"/>
+  <button id="send">Send</button>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script type="module">
+const socket = io();
+
+let myId = null;
+let myPrivateKey = null;
+let myPublicKey = null;
+const sharedKeys = new Map(); // targetUserId → CryptoKey (AES)
+
+const $ = id => document.getElementById(id);
+const chat = $('chat');
+
+// ========== Crypto Helpers ==========
+
+async function generateKeys() {
+  const pair = await crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-384" },
+    true,
+    ["deriveKey"]
+  );
+
+  myPrivateKey = pair.privateKey;
+
+  const exported = await crypto.subtle.exportKey("spki", pair.publicKey);
+  myPublicKey = btoa(String.fromCharCode(...new Uint8Array(exported)));
+  return myPublicKey;
+}
+
+async function deriveSharedKey(targetPublicKey) {
+  const pub = await crypto.subtle.importKey(
+    "spki",
+    Uint8Array.from(atob(targetPublicKey), c => c.charCodeAt(0)),
+    { name: "ECDH", namedCurve: "P-384" },
+    false,
+    []
+  );
+
+  return crypto.subtle.deriveKey(
+    { name: "ECDH", public: pub },
+    myPrivateKey,
+    { name: "AES-GCM", length: 256 },
+    true,
+    ["encrypt", "decrypt"]
+  );
+}
+
+async function encrypt(text, key) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encoded = new TextEncoder().encode(text);
+  const cipher = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    encoded
+  );
+
+  return JSON.stringify({
+    iv: Array.from(iv),
+    data: Array.from(new Uint8Array(cipher))
+  });
+}
+
+async function decrypt(payload, key) {
+  const { iv, data } = JSON.parse(payload);
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: new Uint8Array(iv) },
+    key,
+    new Uint8Array(data)
+  );
+  return new TextDecoder().decode(decrypted);
+}
+
+// ========== UI Helpers ==========
+
+function addMessage(text, isMine = false, from = '') {
+  const div = document.createElement('div');
+  div.className = `msg ${isMine ? 'sent' : 'received'}`;
+  div.textContent = isMine ? text : `${from.slice(0,8)}...: ${text}`;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function updateUsers(usersArray) {
+  const container = $('users');
+  container.innerHTML = '<strong>Online users:</strong><br>';
+  usersArray.forEach(([id, pubKey]) => {
+    if (id === myId) return;
+    const btn = document.createElement('button');
+    btn.className = 'user-btn';
+    btn.textContent = id.slice(0,8) + '...';
+    btn.onclick = () => selectUser(id, pubKey);
+    container.appendChild(btn);
+  });
+}
+
+async function selectUser(targetId, targetPubKey) {
+  if (sharedKeys.has(targetId)) {
+    addMessage(`Already connected with ${targetId.slice(0,8)}...`, true);
+    return;
+  }
+
+  try {
+    const shared = await deriveSharedKey(targetPubKey);
+    sharedKeys.set(targetId, shared);
+    addMessage(`🔒 Secure channel established with ${targetId.slice(0,8)}...`, true);
+  } catch (e) {
+    addMessage('Failed to establish secure channel 😢', true);
+    console.error(e);
+  }
+}
+
+// ========== Socket Events ==========
+
+socket.on('connect', async () => {
+  const pub = await generateKeys();
+  socket.emit('register', { publicKey: pub });
+});
+
+socket.on('registered', ({ userId }) => {
+  myId = userId;
+  $('myId').textContent = userId;
+  addMessage('You are connected! Share your ID with a friend.', true);
+});
+
+socket.on('users', (usersArray) => {
+  updateUsers(usersArray);
+});
+
+socket.on('private-message', async ({ from, encrypted }) => {
+  const key = sharedKeys.get(from);
+  if (!key) {
+    addMessage(`Received message from unknown user ${from.slice(0,8)}...`, false, from);
+    return;
+  }
+
+  try {
+    const text = await decrypt(encrypted, key);
+    addMessage(text, false, from);
+  } catch (e) {
+    addMessage('Could not decrypt message (key mismatch?)', false, from);
+  }
+});
+
+socket.on('error', ({ message }) => {
+  addMessage('Error: ' + message, true);
+});
+
+// ========== Send message ==========
+
+$('send').onclick = async () => {
+  const text = $('message').value.trim();
+  if (!text) return;
+
+  // For simplicity we send to the last selected user
+  // In real app you would have current chat target
+  if (sharedKeys.size === 0) {
+    addMessage('Select a user first!', true);
+    return;
+  }
+
+  // Demo: send to first known contact (improve this!)
+  const targetId = [...sharedKeys.keys()][0];
+  const key = sharedKeys.get(targetId);
+
+  const encrypted = await encrypt(text, key);
+
+  socket.emit('private-message', {
+    to: targetId,
+    encrypted
+  });
+
+  addMessage(text, true);
+  $('message').value = '';
+};
+
+$('message').addEventListener('keypress', e => {
+  if (e.key === 'Enter') $('send').click();
+});
+
+</script>
+</body>
+</html>
